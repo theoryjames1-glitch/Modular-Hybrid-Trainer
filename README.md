@@ -931,7 +931,7 @@ class HybridTrainer:
 
 ### MHT_RewardFactory.py
 
-'''python
+```python
 import math
 from typing import Any, Dict, List, Optional, Tuple
 import torch
