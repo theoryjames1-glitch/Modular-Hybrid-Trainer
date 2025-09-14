@@ -507,6 +507,473 @@ Once a model has been fine-tuned with rewards and classifiers, it can leverage *
 
 By using a **reward-driven training system** with **task-specific heads**, we can train models that are **multi-task capable** and adapt to a wide range of scenarios. These models are trained not just to perform well on a single task but to **generalize** across tasks using a combination of **supervised learning**, **reinforcement learning**, and **reward-based fine-tuning**.
 
+### Optimizer Factory
+
+```python
+# SelectOptimizer.py
+import bitsandbytes as bnb
+from torch.optim import AdamW, Adagrad, RMSprop, SGD
+# Adafactor is not in torch.optim; it’s from transformers
+try:
+    from transformers.optimization import Adafactor
+except Exception:
+    Adafactor = None  # Handle gracefully below
+
+def str2bool(v):
+    return str(v).strip().lower() in ("1", "true", "t", "yes", "y")
+
+def make_optimizer(model, OPTIMIZER, LRATE, config):
+    opt = str(OPTIMIZER).lower()
+
+    # Common hyperparams with sane defaults
+    BETA1 = float(config.get("BETA1", 0.9))
+    BETA2 = float(config.get("BETA2", 0.999))
+    EPS = float(config.get("EPS", 1e-8))
+    WEIGHT_DECAY = float(config.get("WEIGHT_DECAY", 0.01))
+
+    # Adagrad-specific
+    INITIAL_ACCUMULATOR_VALUE = float(config.get("INITIAL_ACCUMULATOR_VALUE", 0.0))
+    LR_DECAY = float(config.get("LR_DECAY", 0.0))
+
+    # RMSprop/SGD-specific
+    ALPHA = float(config.get("ALPHA", 0.99))  # RMSprop smoothing
+    MOMENTUM = float(config.get("MOMENTUM", 0.0))
+    CENTERED = str2bool(config.get("CENTERED", "false"))
+    DAMPENING = float(config.get("DAMPENING", 0.0))
+    NESTEROV = str2bool(config.get("NESTEROV", "false"))
+
+    params = model.parameters()
+
+    # ------- AdamW family (correct params: betas, eps, weight_decay) -------
+    if opt == "paged_adamw_8bit":
+        return bnb.optim.PagedAdamW8bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "paged_adamw_32bit":
+        return bnb.optim.PagedAdamW32bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "adamw_8bit":
+        return bnb.optim.AdamW8bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "adamw_32bit":
+        return bnb.optim.AdamW32bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "adamw":
+        return AdamW(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+
+    # ---------------------------- Adagrad family ----------------------------
+    elif opt == "adagrad":
+        return Adagrad(
+            params,
+            lr=LRATE,
+            lr_decay=LR_DECAY,
+            weight_decay=WEIGHT_DECAY,
+            initial_accumulator_value=INITIAL_ACCUMULATOR_VALUE,
+            eps=EPS,
+        )
+    elif opt == "adagrad_8bit":
+        return bnb.optim.Adagrad8bit(
+            params,
+            lr=LRATE,
+            lr_decay=LR_DECAY,
+            weight_decay=WEIGHT_DECAY,
+            initial_accumulator_value=INITIAL_ACCUMULATOR_VALUE,
+            eps=EPS,
+        )
+    elif opt == "adagrad_32bit":
+        return bnb.optim.Adagrad32bit(
+            params,
+            lr=LRATE,
+            lr_decay=LR_DECAY,
+            weight_decay=WEIGHT_DECAY,
+            initial_accumulator_value=INITIAL_ACCUMULATOR_VALUE,
+            eps=EPS,
+        )
+
+    # ------------------------------ RMSprop ---------------------------------
+    elif opt == "rmsprop":
+        return RMSprop(
+            params,
+            lr=LRATE,
+            alpha=ALPHA,
+            eps=EPS,
+            weight_decay=WEIGHT_DECAY,
+            momentum=MOMENTUM,
+            centered=CENTERED,
+        )
+
+    # ------------------------------- Adam -----------------------------------
+    # Note: Adam uses betas, not alpha/momentum/centered.
+    elif opt == "adam_8bit":
+        return bnb.optim.Adam8bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "adam_32bit":
+        return bnb.optim.Adam32bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "paged_adam_8bit":
+        return bnb.optim.PagedAdam8bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "paged_adam_32bit":
+        return bnb.optim.PagedAdam32bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+
+    # ------------------------------ AdEMAMix --------------------------------
+    elif opt == "ademamix_8bit":
+        return bnb.optim.AdEMAMix8bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "ademamix_32bit":
+        return bnb.optim.AdEMAMix32bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "paged_ademamix_8bit":
+        return bnb.optim.PagedAdEMAMix8bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "paged_ademamix_32bit":
+        return bnb.optim.PagedAdEMAMix32bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), eps=EPS, weight_decay=WEIGHT_DECAY
+        )
+
+    # --------------------------------- SGD ----------------------------------
+    elif opt == "sgd":
+        return SGD(
+            params,
+            lr=LRATE,
+            momentum=MOMENTUM,
+            weight_decay=WEIGHT_DECAY,
+            dampening=DAMPENING,
+            nesterov=NESTEROV,
+        )
+    elif opt == "sgd_8bit":
+        return bnb.optim.SGD8bit(
+            params,
+            lr=LRATE,
+            momentum=MOMENTUM,
+            weight_decay=WEIGHT_DECAY,
+            dampening=DAMPENING,
+            nesterov=NESTEROV,
+        )
+
+    # -------------------------------- Lion ----------------------------------
+    # Lion typically takes (lr, betas, weight_decay)
+    elif opt == "lion_8bit":
+        return bnb.optim.Lion8bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "lion_32bit":
+        return bnb.optim.Lion32bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "paged_lion_8bit":
+        return bnb.optim.PagedLion8bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), weight_decay=WEIGHT_DECAY
+        )
+    elif opt == "paged_lion_32bit":
+        return bnb.optim.PagedLion32bit(
+            params, lr=LRATE, betas=(BETA1, BETA2), weight_decay=WEIGHT_DECAY
+        )
+
+    # ----------------------------- Adafactor --------------------------------
+    elif opt == "adafactor":
+        if Adafactor is None:
+            raise ImportError(
+                "Adafactor requires transformers. Install with `pip install transformers`."
+            )
+        # Typical Adafactor config: often lr=None with relative_step, but honoring your LRATE input.
+        return Adafactor(
+            params,
+            lr=LRATE,
+            # scale_parameter=True,
+            # relative_step=False,
+            # warmup_init=False,
+        )
+
+    else:
+        raise ValueError(f"❌ Unknown optimizer: {OPTIMIZER}")
+```
+
+# Usage:
+# optimizer = make_optimizer(model, OPTIMIZER, LRATE, config)
+# scheduler = None  # or use transformers' get_scheduler()
+
+### Scheduler Factory
+
+```python
+# SelectScheduler.py
+from math import ceil
+
+try:
+    # optional; used if you pick a transformers-style scheduler
+    from transformers import get_scheduler as hf_get_scheduler
+except Exception:
+    hf_get_scheduler = None
+
+from torch.optim.lr_scheduler import (
+    LambdaLR,
+    StepLR,
+    MultiStepLR,
+    ExponentialLR,
+    CosineAnnealingLR,
+    CosineAnnealingWarmRestarts,
+    OneCycleLR,
+    CyclicLR,
+    ReduceLROnPlateau,
+)
+from transformers import (
+    get_scheduler,
+    get_polynomial_decay_schedule_with_warmup,
+    get_cosine_schedule_with_warmup,
+)
+
+def _str2bool(v): return str(v).strip().lower() in ("1", "true", "t", "yes", "y")
+def _f(cfg, k, d): return float(cfg.get(k, d))
+def _i(cfg, k, d): return int(cfg.get(k, d))
+def _s(cfg, k, d): return str(cfg.get(k, d)).strip().lower() if k in cfg else d
+def _lst_int(cfg, k, d=None):
+    if k not in cfg: return d if d is not None else []
+    v = cfg[k]
+    if isinstance(v, (list, tuple)): return [int(x) for x in v]
+    return [int(x.strip()) for x in str(v).split(",") if str(x).strip()]
+
+def _infer_steps(config, num_training_steps, steps_per_epoch, epochs):
+    # Priority: explicit args > config > fallback.
+    if num_training_steps is None:
+        steps_per_epoch = steps_per_epoch or _i(config, "STEPS_PER_EPOCH", 0)
+        epochs = epochs or _i(config, "EPOCHS", 0)
+        if steps_per_epoch and epochs:
+            num_training_steps = steps_per_epoch * epochs
+        else:
+            num_training_steps = _i(config, "NUM_TRAINING_STEPS", 1000)
+    warmup = _i(config, "NUM_WARMUP_STEPS", 0)
+    # Also allow warmup ratio
+    if warmup == 0 and "WARMUP_RATIO" in config:
+        wr = float(config["WARMUP_RATIO"])
+        warmup = int(wr * num_training_steps)
+    return num_training_steps, warmup
+
+def make_scheduler(
+    optimizer,
+    SCHEDULER,
+    config=None,
+    *,
+    num_training_steps=None,
+    num_warmup_steps=None,
+    steps_per_epoch=None,
+    epochs=None,
+):
+    """
+    SCHEDULER (case-insensitive) supports:
+      None / "none"
+      Transformers style: "linear", "cosine", "cosine_with_restarts",
+                          "polynomial"|"poly", "constant", "constant_with_warmup",
+                          "inverse_sqrt"
+      PyTorch style: "step", "multistep", "exponential",
+                     "cosineannealing", "cosineannealing_warm_restarts",
+                     "onecycle", "cyclic", "reduce_on_plateau", "lambda"
+    """
+    config = config or {}
+    name = str(SCHEDULER).strip().lower()
+
+    if name in ("", "none", "null", "no"):
+        return None
+
+    # --- Common step counts ---
+    total_steps, cfg_warmup = _infer_steps(config, num_training_steps, steps_per_epoch, epochs)
+    if num_warmup_steps is None:
+        num_warmup_steps = cfg_warmup
+
+    # ===== Transformers schedulers =====
+    if name in {
+        "linear", "cosine", "cosine_with_restarts",
+        "polynomial", "poly", "constant", "constant_with_warmup",
+        "inverse_sqrt"
+    }:
+        if hf_get_scheduler is None:
+            raise ImportError("Transformers is required for this scheduler. `pip install transformers`")
+
+        # map "poly" -> "polynomial"
+        schedule_type = "polynomial" if name in ("polynomial", "poly") else name
+
+        # extra kwargs supported by HF:
+        power = _f(config, "POLY_POWER", 1.0)  # for polynomial
+        num_cycles = _f(config, "NUM_CYCLES", 0.5)  # for cosine
+        last_epoch = _i(config, "LAST_EPOCH", -1)
+
+    if schedule_type == "polynomial":
+        return get_polynomial_decay_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=total_steps,
+            power=power,
+        )
+    elif schedule_type == "cosine":
+        return get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=total_steps,
+            num_cycles=num_cycles,
+        )
+    else:
+        return get_scheduler(
+            name=schedule_type,
+            optimizer=optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=total_steps,
+        )
+
+    # ===== Pure PyTorch schedulers =====
+    # StepLR
+    if name == "step":
+        step_size = _i(config, "STEP_SIZE", 1000)
+        gamma = _f(config, "GAMMA", 0.1)
+        last_epoch = _i(config, "LAST_EPOCH", -1)
+        return StepLR(optimizer, step_size=step_size, gamma=gamma, last_epoch=last_epoch)
+
+    # MultiStepLR
+    if name == "multistep":
+        milestones = _lst_int(config, "MILESTONES", [1000, 2000, 3000])
+        gamma = _f(config, "GAMMA", 0.1)
+        last_epoch = _i(config, "LAST_EPOCH", -1)
+        return MultiStepLR(optimizer, milestones=milestones, gamma=gamma, last_epoch=last_epoch)
+
+    # ExponentialLR
+    if name == "exponential":
+        gamma = _f(config, "GAMMA", 0.95)
+        last_epoch = _i(config, "LAST_EPOCH", -1)
+        return ExponentialLR(optimizer, gamma=gamma, last_epoch=last_epoch)
+
+    # CosineAnnealingLR (no warmup; specify T_max)
+    if name == "cosineannealing":
+        # You can provide T_MAX in steps; default to total_steps
+        T_max = _i(config, "T_MAX", total_steps)
+        eta_min = _f(config, "MIN_LR", _f(config, "ETA_MIN", 0.0))
+        last_epoch = _i(config, "LAST_EPOCH", -1)
+        return CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min, last_epoch=last_epoch)
+
+    # CosineAnnealingWarmRestarts
+    if name == "cosineannealing_warm_restarts":
+        T_0 = _i(config, "T0", _i(config, "T_0", max(1, total_steps // 10)))
+        T_mult = _i(config, "T_MULT", 2)
+        eta_min = _f(config, "MIN_LR", _f(config, "ETA_MIN", 0.0))
+        last_epoch = _i(config, "LAST_EPOCH", -1)
+        return CosineAnnealingWarmRestarts(optimizer, T_0=T_0, T_mult=T_mult, eta_min=eta_min, last_epoch=last_epoch)
+
+    # OneCycleLR (needs max_lr and total_steps or epochs*steps_per_epoch)
+    if name == "onecycle":
+        max_lr = _f(config, "MAX_LR", 1e-3)
+        pct_start = _f(config, "PCT_START", 0.3)
+        anneal_strategy = _s(config, "ANNEAL_STRATEGY", "cos")  # 'cos' or 'linear'
+        div_factor = _f(config, "DIV_FACTOR", 25.0)
+        final_div_factor = _f(config, "FINAL_DIV_FACTOR", 1e4)
+        three_phase = _str2bool(config.get("THREE_PHASE", "false"))
+        # base_momentum/max_momentum optional; if not given, PyTorch picks defaults
+        base_momentum = float(config["BASE_MOMENTUM"]) if "BASE_MOMENTUM" in config else None
+        max_momentum = float(config["MAX_MOMENTUM"]) if "MAX_MOMENTUM" in config else None
+
+        kwargs = dict(
+            optimizer=optimizer,
+            max_lr=max_lr,
+            total_steps=total_steps,
+            pct_start=pct_start,
+            anneal_strategy=anneal_strategy,
+            div_factor=div_factor,
+            final_div_factor=final_div_factor,
+            three_phase=three_phase,
+        )
+        if base_momentum is not None: kwargs["base_momentum"] = base_momentum
+        if max_momentum is not None: kwargs["max_momentum"] = max_momentum
+        return OneCycleLR(**kwargs)
+
+    # CyclicLR
+    if name == "cyclic":
+        base_lr = _f(config, "BASE_LR", 1e-6)
+        max_lr = _f(config, "MAX_LR", 1e-3)
+        step_size_up = _i(config, "STEP_SIZE_UP", ceil(total_steps * 0.4))
+        step_size_down = _i(config, "STEP_SIZE_DOWN", ceil(total_steps * 0.4))
+        mode = _s(config, "MODE", "triangular")  # 'triangular', 'triangular2', 'exp_range'
+        gamma = _f(config, "GAMMA", 1.0)         # for 'exp_range'
+        cycle_momentum = _str2bool(config.get("CYCLE_MOMENTUM", "true"))
+        base_momentum = float(config["BASE_MOMENTUM"]) if "BASE_MOMENTUM" in config else 0.85
+        max_momentum = float(config["MAX_MOMENTUM"]) if "MAX_MOMENTUM" in config else 0.95
+        return CyclicLR(
+            optimizer,
+            base_lr=base_lr, max_lr=max_lr,
+            step_size_up=step_size_up, step_size_down=step_size_down,
+            mode=mode, gamma=gamma,
+            cycle_momentum=cycle_momentum,
+            base_momentum=base_momentum, max_momentum=max_momentum,
+        )
+
+    # ReduceLROnPlateau (call scheduler.step(val_metric) after each validation)
+    if name == "reduce_on_plateau":
+        mode = _s(config, "MODE", "min")  # 'min' or 'max'
+        factor = _f(config, "FACTOR", 0.1)
+        patience = _i(config, "PATIENCE", 10)
+        threshold = _f(config, "THRESHOLD", 1e-4)
+        threshold_mode = _s(config, "THRESHOLD_MODE", "rel")  # 'rel' or 'abs'
+        cooldown = _i(config, "COOLDOWN", 0)
+        min_lr = _f(config, "MIN_LR", 0.0)
+        eps = _f(config, "EPS", 1e-8)
+        return ReduceLROnPlateau(
+            optimizer, mode=mode, factor=factor, patience=patience,
+            threshold=threshold, threshold_mode=threshold_mode,
+            cooldown=cooldown, min_lr=min_lr, eps=eps
+        )
+
+    # Simple LambdaLR (e.g., linear decay to a floor)
+    if name == "lambda":
+        # Example: linear decay from 1.0 -> LR_FLOOR over total_steps
+        lr_floor = _f(config, "LR_FLOOR", 0.0)
+        def lr_lambda(step):
+            if total_steps <= 0: return 1.0
+            frac = max(0.0, 1.0 - step / float(total_steps))
+            # map [0,1] -> [lr_floor/initial_lr, 1.0]
+            return lr_floor + (1.0 - lr_floor) * frac
+        last_epoch = _i(config, "LAST_EPOCH", -1)
+        return LambdaLR(optimizer, lr_lambda=lr_lambda, last_epoch=last_epoch)
+
+    raise ValueError(f"❌ Unknown scheduler: {SCHEDULER}")
+
+
+# --------- Examples / usage ----------
+# total_steps = num_batches_per_epoch * num_epochs
+# scheduler = make_scheduler(
+#     optimizer,
+#     SCHEDULER="linear",  # or "onecycle", "cosine", "step", ...
+#     config={
+#         "NUM_TRAINING_STEPS": 20000,
+#         "NUM_WARMUP_STEPS": 1000,
+#         # for step:
+#         # "STEP_SIZE": 4000, "GAMMA": 0.5
+#         # for onecycle:
+#         # "MAX_LR": 2e-4, "PCT_START": 0.1, "DIV_FACTOR": 10, "FINAL_DIV_FACTOR": 1e3
+#     },
+# )
+#
+# # Train loop:
+# # If you used ReduceLROnPlateau:
+# #   scheduler.step(val_loss)
+# # Else (most schedulers):
+# #   scheduler.step()
+```
+
+### quick notes
+
+* If you choose `"reduce_on_plateau"`, remember to call `scheduler.step(val_metric)` after validation, not every iteration.
+* Transformers schedules expect **step counts** (`num_training_steps`, `num_warmup_steps`). If you provide `EPOCHS` and `STEPS_PER_EPOCH` in `config`, the helper infers total steps for you.
+* `"poly"` is aliased to `"polynomial"`; cosine variants support `NUM_CYCLES` (HF) and `eta_min` (PyTorch).
+* For `OneCycleLR`, pass `MAX_LR`. If you don’t provide momentum settings, PyTorch defaults are used.
+
 ### PSEUDOCODE
 
 ```python
@@ -618,9 +1085,8 @@ class HybridTrainer:
 
 ### Reward Factory
 
-```python
+
 ### MHT_RewardFactory.py
-"""
     Sure! Here's a list of **reward types** that you can add to your **HybridTrainer** setup in the future. These reward types can be used for various NLP tasks and combined in different ways, depending on your needs.
 
     ### **Reward Types for Text Generation and NLP Tasks**
@@ -759,7 +1225,8 @@ class HybridTrainer:
     * **Custom Hybrid Rewards** (e.g., combining different textual similarity metrics or custom domain-specific knowledge)
 
     The key is to ensure each new reward type is easy to integrate and use through the reward factory, making the process of swapping and combining rewards seamless and flexible.
-"""
+
+'''python
 import math
 from typing import Any, Dict, List, Optional, Tuple
 import torch
