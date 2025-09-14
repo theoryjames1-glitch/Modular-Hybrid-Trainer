@@ -547,8 +547,10 @@ def make_optimizer(model, OPTIMIZER, LRATE, config):
 ```
 
 # Usage:
-# optimizer = make_optimizer(model, OPTIMIZER, LRATE, config)
-# scheduler = None  # or use transformers' get_scheduler()
+```python
+optimizer = make_optimizer(model, OPTIMIZER, LRATE, config)
+scheduler = None  # or use transformers' get_scheduler()
+```
 
 ### Scheduler Factory
 
