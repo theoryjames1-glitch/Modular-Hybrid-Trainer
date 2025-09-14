@@ -1,6 +1,4 @@
-Got it — here’s a **clear theory summary** of how your **HybridTrainer** works, plus a roadmap of improvements and additions you can plan next.
 
----
 
 # 📖 Theory of HybridTrainer
 
