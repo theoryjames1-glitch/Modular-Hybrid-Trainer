@@ -214,6 +214,143 @@ Once a model has been fine-tuned with rewards and classifiers, it can leverage *
 
 By using a **reward-driven training system** with **task-specific heads**, we can train models that are **multi-task capable** and adapt to a wide range of scenarios. These models are trained not just to perform well on a single task but to **generalize** across tasks using a combination of **supervised learning**, **reinforcement learning**, and **reward-based fine-tuning**.
 
+### **Reward Types for Text Generation and NLP Tasks**
+
+#### **1. Semantic Similarity and Text Matching**
+
+* **Cosine Similarity (CosineSTS)**: Measures the similarity between the generated and target text using cosine similarity in embedding space (e.g., Sentence-BERT or other embedding models).
+* **Exact Match**: Checks whether the generated text exactly matches the target text.
+* **Jaccard Similarity**: Measures the overlap between the sets of words in the generated and target text using Jaccard’s coefficient.
+* **Levenshtein Distance (Edit Distance)**: Measures the number of edits (insertions, deletions, substitutions) required to transform one text into another.
+* **BERTScore**: Uses BERT-based embeddings to calculate token-level similarity scores between the generated and reference texts.
+
+#### **2. Language Quality**
+
+* **Perplexity**: Measures the uncertainty of the model in predicting the next token. Lower perplexity means better language modeling.
+* **BLEU (Bilingual Evaluation Understudy)**: Measures the n-gram overlap between the generated and reference text. Commonly used for machine translation evaluation.
+* **ROUGE-L (Recall-Oriented Understudy for Gisting Evaluation)**: Measures the longest common subsequence between the generated and reference text. Often used for summarization tasks.
+* **TER (Translation Edit Rate)**: Measures the number of edits needed to transform the generated text into the reference text.
+* **METEOR**: Measures text similarity based on precision, recall, synonym matching, stemming, etc. Commonly used in machine translation.
+
+#### **3. Toxicity and Bias Detection**
+
+* **Toxicity**: Measures the degree of toxicity in the generated text. Typically uses pre-trained models like **Detoxify** or **Toxic-BERT**.
+* **Bias**: Measures the bias present in the generated text. This could involve detecting gender, racial, or ideological bias.
+* **Hate Speech**: Detects whether the generated text contains hate speech or offensive language.
+* **Offensiveness Score**: Similar to toxicity, but focuses specifically on offensive language.
+
+#### **4. Relevance and Coherence**
+
+* **Topic Consistency**: Measures how consistent the generated text is with the intended topic or subject matter.
+* **Question Answering (QA) Relevance**: Measures the relevance of the response in a QA task. For example, checking if the response properly answers the input question.
+* **Factual Accuracy**: Evaluates the factual correctness of the generated text (could use external knowledge sources to verify).
+
+#### **5. Sentiment and Emotion**
+
+* **Sentiment Analysis**: Measures the sentiment (positive, negative, neutral) of the generated text and compares it with the target sentiment.
+* **Emotion Detection**: Measures the presence of specific emotions like joy, sadness, anger, etc., in the generated text.
+* **Sarcasm Detection**: Detects whether the generated text contains sarcastic statements.
+
+#### **6. Style and Structure**
+
+* **Readability**: Measures how readable the text is based on various readability scores (e.g., Flesch-Kincaid, Gunning Fog Index).
+* **Fluency**: Measures how natural and fluent the generated text sounds.
+* **Formality/Informality**: Measures whether the generated text adheres to a specific formality level (e.g., formal vs. informal tone).
+* **Spelling and Grammar Accuracy**: Checks if the generated text has correct spelling and grammar.
+
+#### **7. Diversity and Creativity**
+
+* **Novelty**: Measures how unique or novel the generated text is compared to previous text in the training set.
+* **Diversity**: Measures the diversity of generated responses, preventing the model from generating repetitive or stale outputs.
+* **Exploration**: Encourages the model to explore diverse response spaces and avoid overfitting to one type of output.
+
+#### **8. Content Generation for Specific Domains**
+
+* **Medical Accuracy**: Measures the accuracy of generated text in medical or healthcare domains.
+* **Legal Validity**: Evaluates the legal validity or correctness of the generated content in legal contexts.
+* **Scientific Integrity**: Measures how scientifically accurate the generated text is, especially in technical or research domains.
+
+#### **9. Structured Output Quality**
+
+* **Length Consistency**: Measures if the length of the generated output is within a specific range or follows expected output length.
+* **Format Accuracy**: Evaluates if the generated text follows a specific format (e.g., numbered list, paragraphs, etc.).
+* **Entity Consistency**: Measures if the same entities (names, locations, etc.) appear consistently throughout the text.
+
+---
+
+### **How to Add These Rewards Later**
+
+#### **1. Define Reward Classes**
+
+For each of the above reward types, you need to define a class (like you've already done with **BLEU**, **ROUGE**, **Toxicity**, etc.). Each class should inherit from the base `Reward` class and implement the `__call__` method.
+
+#### **2. Integrate Into the Reward Factory**
+
+You can integrate these new rewards into the **Reward Factory** by following the same pattern used for the existing rewards. Simply add new conditions in the `make_reward` function to handle the creation of these new reward classes.
+
+For example, to add **Sarcasm Detection**:
+
+```python
+class SarcasmReward(Reward):
+    def __init__(self, model="sarcasm-detection-model"):
+        self.model = load_model(model)
+
+    def __call__(self, response, target, **_):
+        return self.model.predict(response)
+```
+
+And then add it to the factory:
+
+```python
+def _build_leaf(spec: Dict[str, Any]) -> Reward:
+    t = spec.get("type", "").lower()
+    if t == "sarcasm":
+        return SarcasmReward(model=spec.get("model", "sarcasm-detection-model"))
+    # other reward types...
+```
+
+#### **3. JSON Configuration**
+
+Rewards can be configured through a JSON configuration file. Each reward type can have its own settings and weightings.
+
+Example:
+
+```json
+{
+"REWARD": {
+    "type": "weighted_sum",
+    "components": [
+    {"type": "sentiment", "weight": 0.3},
+    {"type": "perplexity", "weight": 0.3},
+    {"type": "cosine_sts", "weight": 0.4}
+    ]
+}
+}
+```
+
+#### **4. Dynamic Reward Computation**
+
+Once the rewards are defined and integrated into the factory, they can be dynamically computed during the training loop. As shown before:
+
+```python
+rew = reward_fn(response_text, target_text, prompt=prompt, item=item)
+batch_rewards.append(float(rew))
+```
+
+You can modify the reward computation to handle the weights and multiple components for weighted sum or other complex reward combinations.
+
+---
+
+### **Future Additions**
+
+As you progress, here are some rewards that could be added:
+
+* **Domain-Specific Rewards** (e.g., medical, legal, etc.)
+* **Reinforcement Learning Rewards** (e.g., exploration bonuses, curiosity-driven rewards)
+* **Custom Hybrid Rewards** (e.g., combining different textual similarity metrics or custom domain-specific knowledge)
+
+The key is to ensure each new reward type is easy to integrate and use through the reward factory, making the process of swapping and combining rewards seamless and flexible.
+
 ### Optimizer Factory
 
 ```python
@@ -790,148 +927,7 @@ class HybridTrainer:
         return stats
 ```
 
-### Reward Factory
-
-
 ### MHT_RewardFactory.py
-    Sure! Here's a list of **reward types** that you can add to your **HybridTrainer** setup in the future. These reward types can be used for various NLP tasks and combined in different ways, depending on your needs.
-
-    ### **Reward Types for Text Generation and NLP Tasks**
-
-    #### **1. Semantic Similarity and Text Matching**
-
-    * **Cosine Similarity (CosineSTS)**: Measures the similarity between the generated and target text using cosine similarity in embedding space (e.g., Sentence-BERT or other embedding models).
-    * **Exact Match**: Checks whether the generated text exactly matches the target text.
-    * **Jaccard Similarity**: Measures the overlap between the sets of words in the generated and target text using Jaccard’s coefficient.
-    * **Levenshtein Distance (Edit Distance)**: Measures the number of edits (insertions, deletions, substitutions) required to transform one text into another.
-    * **BERTScore**: Uses BERT-based embeddings to calculate token-level similarity scores between the generated and reference texts.
-
-    #### **2. Language Quality**
-
-    * **Perplexity**: Measures the uncertainty of the model in predicting the next token. Lower perplexity means better language modeling.
-    * **BLEU (Bilingual Evaluation Understudy)**: Measures the n-gram overlap between the generated and reference text. Commonly used for machine translation evaluation.
-    * **ROUGE-L (Recall-Oriented Understudy for Gisting Evaluation)**: Measures the longest common subsequence between the generated and reference text. Often used for summarization tasks.
-    * **TER (Translation Edit Rate)**: Measures the number of edits needed to transform the generated text into the reference text.
-    * **METEOR**: Measures text similarity based on precision, recall, synonym matching, stemming, etc. Commonly used in machine translation.
-
-    #### **3. Toxicity and Bias Detection**
-
-    * **Toxicity**: Measures the degree of toxicity in the generated text. Typically uses pre-trained models like **Detoxify** or **Toxic-BERT**.
-    * **Bias**: Measures the bias present in the generated text. This could involve detecting gender, racial, or ideological bias.
-    * **Hate Speech**: Detects whether the generated text contains hate speech or offensive language.
-    * **Offensiveness Score**: Similar to toxicity, but focuses specifically on offensive language.
-
-    #### **4. Relevance and Coherence**
-
-    * **Topic Consistency**: Measures how consistent the generated text is with the intended topic or subject matter.
-    * **Question Answering (QA) Relevance**: Measures the relevance of the response in a QA task. For example, checking if the response properly answers the input question.
-    * **Factual Accuracy**: Evaluates the factual correctness of the generated text (could use external knowledge sources to verify).
-
-    #### **5. Sentiment and Emotion**
-
-    * **Sentiment Analysis**: Measures the sentiment (positive, negative, neutral) of the generated text and compares it with the target sentiment.
-    * **Emotion Detection**: Measures the presence of specific emotions like joy, sadness, anger, etc., in the generated text.
-    * **Sarcasm Detection**: Detects whether the generated text contains sarcastic statements.
-
-    #### **6. Style and Structure**
-
-    * **Readability**: Measures how readable the text is based on various readability scores (e.g., Flesch-Kincaid, Gunning Fog Index).
-    * **Fluency**: Measures how natural and fluent the generated text sounds.
-    * **Formality/Informality**: Measures whether the generated text adheres to a specific formality level (e.g., formal vs. informal tone).
-    * **Spelling and Grammar Accuracy**: Checks if the generated text has correct spelling and grammar.
-
-    #### **7. Diversity and Creativity**
-
-    * **Novelty**: Measures how unique or novel the generated text is compared to previous text in the training set.
-    * **Diversity**: Measures the diversity of generated responses, preventing the model from generating repetitive or stale outputs.
-    * **Exploration**: Encourages the model to explore diverse response spaces and avoid overfitting to one type of output.
-
-    #### **8. Content Generation for Specific Domains**
-
-    * **Medical Accuracy**: Measures the accuracy of generated text in medical or healthcare domains.
-    * **Legal Validity**: Evaluates the legal validity or correctness of the generated content in legal contexts.
-    * **Scientific Integrity**: Measures how scientifically accurate the generated text is, especially in technical or research domains.
-
-    #### **9. Structured Output Quality**
-
-    * **Length Consistency**: Measures if the length of the generated output is within a specific range or follows expected output length.
-    * **Format Accuracy**: Evaluates if the generated text follows a specific format (e.g., numbered list, paragraphs, etc.).
-    * **Entity Consistency**: Measures if the same entities (names, locations, etc.) appear consistently throughout the text.
-
-    ---
-
-    ### **How to Add These Rewards Later**
-
-    #### **1. Define Reward Classes**
-
-    For each of the above reward types, you need to define a class (like you've already done with **BLEU**, **ROUGE**, **Toxicity**, etc.). Each class should inherit from the base `Reward` class and implement the `__call__` method.
-
-    #### **2. Integrate Into the Reward Factory**
-
-    You can integrate these new rewards into the **Reward Factory** by following the same pattern used for the existing rewards. Simply add new conditions in the `make_reward` function to handle the creation of these new reward classes.
-
-    For example, to add **Sarcasm Detection**:
-
-    ```python
-    class SarcasmReward(Reward):
-        def __init__(self, model="sarcasm-detection-model"):
-            self.model = load_model(model)
-
-        def __call__(self, response, target, **_):
-            return self.model.predict(response)
-    ```
-
-    And then add it to the factory:
-
-    ```python
-    def _build_leaf(spec: Dict[str, Any]) -> Reward:
-        t = spec.get("type", "").lower()
-        if t == "sarcasm":
-            return SarcasmReward(model=spec.get("model", "sarcasm-detection-model"))
-        # other reward types...
-    ```
-
-    #### **3. JSON Configuration**
-
-    Rewards can be configured through a JSON configuration file. Each reward type can have its own settings and weightings.
-
-    Example:
-
-    ```json
-    {
-    "REWARD": {
-        "type": "weighted_sum",
-        "components": [
-        {"type": "sentiment", "weight": 0.3},
-        {"type": "perplexity", "weight": 0.3},
-        {"type": "cosine_sts", "weight": 0.4}
-        ]
-    }
-    }
-    ```
-
-    #### **4. Dynamic Reward Computation**
-
-    Once the rewards are defined and integrated into the factory, they can be dynamically computed during the training loop. As shown before:
-
-    ```python
-    rew = reward_fn(response_text, target_text, prompt=prompt, item=item)
-    batch_rewards.append(float(rew))
-    ```
-
-    You can modify the reward computation to handle the weights and multiple components for weighted sum or other complex reward combinations.
-
-    ---
-
-    ### **Future Additions**
-
-    As you progress, here are some rewards that could be added:
-
-    * **Domain-Specific Rewards** (e.g., medical, legal, etc.)
-    * **Reinforcement Learning Rewards** (e.g., exploration bonuses, curiosity-driven rewards)
-    * **Custom Hybrid Rewards** (e.g., combining different textual similarity metrics or custom domain-specific knowledge)
-
-    The key is to ensure each new reward type is easy to integrate and use through the reward factory, making the process of swapping and combining rewards seamless and flexible.
 
 '''python
 import math
