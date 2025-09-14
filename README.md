@@ -507,3 +507,619 @@ Once a model has been fine-tuned with rewards and classifiers, it can leverage *
 
 By using a **reward-driven training system** with **task-specific heads**, we can train models that are **multi-task capable** and adapt to a wide range of scenarios. These models are trained not just to perform well on a single task but to **generalize** across tasks using a combination of **supervised learning**, **reinforcement learning**, and **reward-based fine-tuning**.
 
+### PSEUDOCODE
+
+```python
+# MHT_HybridTrainer.py
+
+import torch
+from torch.utils.data import DataLoader
+from transformers import AutoTokenizer
+from trl import (
+    SFTTrainer,
+    PPOTrainer,
+    PPOConfig,
+    AutoModelForCausalLMWithValueHead,
+    create_reference_model,
+)
+from trl.core import respond_to_batch
+
+from SelectOptimizer import make_optimizer
+from SelectScheduler import make_scheduler
+
+
+# === Hybrid Trainer ===
+class HybridTrainer:
+    def __init__(self, base_model_name, tokenizer, train_data, reward_fn,
+                 optimizer_config=None, scheduler_config=None,
+                 lrate=5e-5, batch_size=1,
+                 maxseq=512, max_new_tokens=128,
+                 num_training_steps=None, num_warmup_steps=None,
+                 debug=False):
+
+        self.debug = debug
+        self.tokenizer = tokenizer
+        self.train_data = train_data
+        self.reward_fn = reward_fn
+        self.maxseq = maxseq
+        self.max_new_tokens = max_new_tokens
+        self.batch_size = batch_size
+
+        # Model with both LM head + Value head
+        self.model = AutoModelForCausalLMWithValueHead.from_pretrained(base_model_name,device_map="auto",dtype=torch.bfloat16)
+        self.pretrained_model = self.model.pretrained_model
+        self.device = self.pretrained_model.device        
+        # --- Build optimizer & scheduler ---
+        self.optimizer = make_optimizer(
+            self.model,
+            OPTIMIZER=(optimizer_config or {}).get("OPTIMIZER", "adamw"),
+            LRATE=lrate,
+            config=optimizer_config or {}
+        )
+        self.scheduler = make_scheduler(
+            self.optimizer,
+            SCHEDULER=(scheduler_config or {}).get("SCHEDULER", "linear"),
+            config=scheduler_config or {},
+            num_training_steps=num_training_steps,
+            num_warmup_steps=num_warmup_steps
+        )
+
+        # --- SFTTrainer (LM head only) ---
+        self.sft_trainer = SFTTrainer(
+            model=self.model.pretrained_model,
+            tokenizer=self.tokenizer,
+            train_dataset=self.train_data,
+            max_seq_length=self.maxseq,
+            packing=True,
+        )
+        self.sft_trainer.optimizer = self.optimizer
+        self.sft_trainer.lr_scheduler = self.scheduler
+
+        # --- PPOTrainer (LM + Value head) ---
+        ppo_config = PPOConfig(
+            model_name=base_model_name,
+            batch_size=self.batch_size,
+            mini_batch_size=1,
+            gradient_accumulation_steps=1,
+        )
+        self.ref_model = create_reference_model(self.model)
+        self.ppo_trainer = PPOTrainer(
+            config=ppo_config,
+            model=self.model,
+            ref_model=self.ref_model,
+            tokenizer=self.tokenizer,
+            dataset=self.train_data,
+        )
+        self.ppo_trainer.lr_scheduler = self.scheduler
+
+    def sft_step(self, batch):
+        loss = self.sft_trainer.compute_loss(self.model.pretrained_model, batch)
+        loss.backward()
+        self.optimizer.step()
+        if self.scheduler:
+            self.scheduler.step()
+        self.optimizer.zero_grad()
+        return float(loss.item())
+
+    def respond_to_batch(self,input_ids):
+        return respond_to_batch(self.model, input_ids)
+        
+    # ---- One PPO step ----
+    def ppo_step(self,input_ids,response_ids,rewards):
+ 
+        # PPO step
+        stats = self.ppo_trainer.step(
+            [input_ids.squeeze(0)],     # queries
+            [response_ids.squeeze(0)],  # responses
+            [torch.tensor(rewards[0])]  # rewards
+        )
+        return stats
+```
+
+### Reward Factory
+
+```python
+### MHT_RewardFactory.py
+"""
+    Sure! Here's a list of **reward types** that you can add to your **HybridTrainer** setup in the future. These reward types can be used for various NLP tasks and combined in different ways, depending on your needs.
+
+    ### **Reward Types for Text Generation and NLP Tasks**
+
+    #### **1. Semantic Similarity and Text Matching**
+
+    * **Cosine Similarity (CosineSTS)**: Measures the similarity between the generated and target text using cosine similarity in embedding space (e.g., Sentence-BERT or other embedding models).
+    * **Exact Match**: Checks whether the generated text exactly matches the target text.
+    * **Jaccard Similarity**: Measures the overlap between the sets of words in the generated and target text using Jaccard’s coefficient.
+    * **Levenshtein Distance (Edit Distance)**: Measures the number of edits (insertions, deletions, substitutions) required to transform one text into another.
+    * **BERTScore**: Uses BERT-based embeddings to calculate token-level similarity scores between the generated and reference texts.
+
+    #### **2. Language Quality**
+
+    * **Perplexity**: Measures the uncertainty of the model in predicting the next token. Lower perplexity means better language modeling.
+    * **BLEU (Bilingual Evaluation Understudy)**: Measures the n-gram overlap between the generated and reference text. Commonly used for machine translation evaluation.
+    * **ROUGE-L (Recall-Oriented Understudy for Gisting Evaluation)**: Measures the longest common subsequence between the generated and reference text. Often used for summarization tasks.
+    * **TER (Translation Edit Rate)**: Measures the number of edits needed to transform the generated text into the reference text.
+    * **METEOR**: Measures text similarity based on precision, recall, synonym matching, stemming, etc. Commonly used in machine translation.
+
+    #### **3. Toxicity and Bias Detection**
+
+    * **Toxicity**: Measures the degree of toxicity in the generated text. Typically uses pre-trained models like **Detoxify** or **Toxic-BERT**.
+    * **Bias**: Measures the bias present in the generated text. This could involve detecting gender, racial, or ideological bias.
+    * **Hate Speech**: Detects whether the generated text contains hate speech or offensive language.
+    * **Offensiveness Score**: Similar to toxicity, but focuses specifically on offensive language.
+
+    #### **4. Relevance and Coherence**
+
+    * **Topic Consistency**: Measures how consistent the generated text is with the intended topic or subject matter.
+    * **Question Answering (QA) Relevance**: Measures the relevance of the response in a QA task. For example, checking if the response properly answers the input question.
+    * **Factual Accuracy**: Evaluates the factual correctness of the generated text (could use external knowledge sources to verify).
+
+    #### **5. Sentiment and Emotion**
+
+    * **Sentiment Analysis**: Measures the sentiment (positive, negative, neutral) of the generated text and compares it with the target sentiment.
+    * **Emotion Detection**: Measures the presence of specific emotions like joy, sadness, anger, etc., in the generated text.
+    * **Sarcasm Detection**: Detects whether the generated text contains sarcastic statements.
+
+    #### **6. Style and Structure**
+
+    * **Readability**: Measures how readable the text is based on various readability scores (e.g., Flesch-Kincaid, Gunning Fog Index).
+    * **Fluency**: Measures how natural and fluent the generated text sounds.
+    * **Formality/Informality**: Measures whether the generated text adheres to a specific formality level (e.g., formal vs. informal tone).
+    * **Spelling and Grammar Accuracy**: Checks if the generated text has correct spelling and grammar.
+
+    #### **7. Diversity and Creativity**
+
+    * **Novelty**: Measures how unique or novel the generated text is compared to previous text in the training set.
+    * **Diversity**: Measures the diversity of generated responses, preventing the model from generating repetitive or stale outputs.
+    * **Exploration**: Encourages the model to explore diverse response spaces and avoid overfitting to one type of output.
+
+    #### **8. Content Generation for Specific Domains**
+
+    * **Medical Accuracy**: Measures the accuracy of generated text in medical or healthcare domains.
+    * **Legal Validity**: Evaluates the legal validity or correctness of the generated content in legal contexts.
+    * **Scientific Integrity**: Measures how scientifically accurate the generated text is, especially in technical or research domains.
+
+    #### **9. Structured Output Quality**
+
+    * **Length Consistency**: Measures if the length of the generated output is within a specific range or follows expected output length.
+    * **Format Accuracy**: Evaluates if the generated text follows a specific format (e.g., numbered list, paragraphs, etc.).
+    * **Entity Consistency**: Measures if the same entities (names, locations, etc.) appear consistently throughout the text.
+
+    ---
+
+    ### **How to Add These Rewards Later**
+
+    #### **1. Define Reward Classes**
+
+    For each of the above reward types, you need to define a class (like you've already done with **BLEU**, **ROUGE**, **Toxicity**, etc.). Each class should inherit from the base `Reward` class and implement the `__call__` method.
+
+    #### **2. Integrate Into the Reward Factory**
+
+    You can integrate these new rewards into the **Reward Factory** by following the same pattern used for the existing rewards. Simply add new conditions in the `make_reward` function to handle the creation of these new reward classes.
+
+    For example, to add **Sarcasm Detection**:
+
+    ```python
+    class SarcasmReward(Reward):
+        def __init__(self, model="sarcasm-detection-model"):
+            self.model = load_model(model)
+
+        def __call__(self, response, target, **_):
+            return self.model.predict(response)
+    ```
+
+    And then add it to the factory:
+
+    ```python
+    def _build_leaf(spec: Dict[str, Any]) -> Reward:
+        t = spec.get("type", "").lower()
+        if t == "sarcasm":
+            return SarcasmReward(model=spec.get("model", "sarcasm-detection-model"))
+        # other reward types...
+    ```
+
+    #### **3. JSON Configuration**
+
+    Rewards can be configured through a JSON configuration file. Each reward type can have its own settings and weightings.
+
+    Example:
+
+    ```json
+    {
+    "REWARD": {
+        "type": "weighted_sum",
+        "components": [
+        {"type": "sentiment", "weight": 0.3},
+        {"type": "perplexity", "weight": 0.3},
+        {"type": "cosine_sts", "weight": 0.4}
+        ]
+    }
+    }
+    ```
+
+    #### **4. Dynamic Reward Computation**
+
+    Once the rewards are defined and integrated into the factory, they can be dynamically computed during the training loop. As shown before:
+
+    ```python
+    rew = reward_fn(response_text, target_text, prompt=prompt, item=item)
+    batch_rewards.append(float(rew))
+    ```
+
+    You can modify the reward computation to handle the weights and multiple components for weighted sum or other complex reward combinations.
+
+    ---
+
+    ### **Future Additions**
+
+    As you progress, here are some rewards that could be added:
+
+    * **Domain-Specific Rewards** (e.g., medical, legal, etc.)
+    * **Reinforcement Learning Rewards** (e.g., exploration bonuses, curiosity-driven rewards)
+    * **Custom Hybrid Rewards** (e.g., combining different textual similarity metrics or custom domain-specific knowledge)
+
+    The key is to ensure each new reward type is easy to integrate and use through the reward factory, making the process of swapping and combining rewards seamless and flexible.
+"""
+import math
+from typing import Any, Dict, List, Optional, Tuple
+import torch
+from transformers import pipeline
+from sentence_transformers import SentenceTransformer, util as st_util
+from sacrebleu import corpus_bleu
+from rouge_score import rouge_scorer
+from detoxify import Detoxify
+from bert_score import score
+
+# -----------------------------
+# Base reward interface
+# -----------------------------
+class Reward:
+    """Base class for reward classes."""
+    def __call__(self, response: str, target: str, *, prompt: str = "", item: dict | None = None) -> float:
+        raise NotImplementedError
+
+
+# -----------------------------
+# Sentiment Analysis Reward (using Huggingface pipeline)
+# -----------------------------
+class SentimentReward(Reward):
+    def __init__(self, model="distilbert-base-uncased-finetuned-sst-2-english", target="positive"):
+        self.model = pipeline("sentiment-analysis", model=model)
+        self.target = target
+
+    def __call__(self, response, target, **_):
+        prediction = self.model(response)[0]
+        label = prediction["label"].lower()
+        score = prediction["score"]
+        return score if self.target in label else 1.0 - score
+
+
+# -----------------------------
+# Perplexity Reward (using GPT2)
+# -----------------------------
+class PerplexityReward(Reward):
+    def __init__(self, model="gpt2"):
+        from transformers import GPT2LMHeadModel, GPT2Tokenizer
+        self.model = GPT2LMHeadModel.from_pretrained(model)
+        self.tokenizer = GPT2Tokenizer.from_pretrained(model)
+        self.model.eval()  # Set to evaluation mode
+
+    def __call__(self, response, target, **_):
+        inputs = self.tokenizer(response, return_tensors="pt", truncation=True, padding=True)
+        with torch.no_grad():
+            outputs = self.model(**inputs, labels=inputs["input_ids"])
+            loss = outputs.loss
+            return math.exp(loss.item())  # Perplexity is the exponential of the loss
+
+
+# -----------------------------
+# BLEU Reward
+# -----------------------------
+class BLEUReward(Reward):
+    def __init__(self, smooth_method="exp", lowercase=True):
+        self.smooth_method = smooth_method
+        self.lowercase = lowercase
+
+    def __call__(self, response, target, **_):
+        reference = [target.split()]
+        hypothesis = response.split()
+        score = corpus_bleu([hypothesis], [reference], smooth_method=self.smooth_method).score
+        return score / 100  # Normalize BLEU score between 0 and 1
+
+
+# -----------------------------
+# ROUGE-L Reward
+# -----------------------------
+class RougeLReward(Reward):
+    def __init__(self, use_stemmer=True, lowercase=True):
+        self.scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=use_stemmer)
+        self.lowercase = lowercase
+
+    def __call__(self, response, target, **_):
+        if self.lowercase:
+            response, target = response.lower(), target.lower()
+        scores = self.scorer.score(target, response)
+        return scores["rougeL"].fmeasure  # ROUGE-L F1 score in [0, 1]
+
+
+# -----------------------------
+# Toxicity Reward (using Detoxify)
+# -----------------------------
+class ToxicityReward(Reward):
+    def __init__(self, model="original", invert=True):
+        self.detoxify_model = Detoxify(model)
+        self.invert = invert
+
+    def __call__(self, response, target, **_):
+        tox_score = self.detoxify_model.predict(response)["toxicity"]
+        return 1.0 - tox_score if self.invert else tox_score
+
+
+# -----------------------------
+# BERTScore Reward
+# -----------------------------
+class BERTScoreReward(Reward):
+    def __init__(self, model_type="microsoft/deberta-xlarge-mnli"):
+        self.model_type = model_type
+
+    def __call__(self, response, target, **_):
+        P, R, F1 = score([response], [target], model_type=self.model_type)
+        return float(F1)  # Return F1 score as the reward
+
+
+# -----------------------------
+# Cosine Similarity Reward (Text Similarity)
+# -----------------------------
+class CosineSTS(Reward):
+    _MODEL_CACHE: dict[str, SentenceTransformer] = {}
+    
+    def __init__(self, model_name="all-MiniLM-L6-v2", device=None):
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        if model_name not in CosineSTS._MODEL_CACHE:
+            CosineSTS._MODEL_CACHE[model_name] = SentenceTransformer(model_name, device=self.device)
+        self.model = CosineSTS._MODEL_CACHE[model_name]
+
+    @torch.inference_mode()
+    def __call__(self, response, target, **_):
+        e1 = self.model.encode(response or "", convert_to_tensor=True, normalize_embeddings=True)
+        e2 = self.model.encode(target   or "", convert_to_tensor=True, normalize_embeddings=True)
+        sim = st_util.cos_sim(e1, e2).item()  # [-1, 1]
+        return 0.5 * (sim + 1.0)  # Normalize to [0, 1]
+
+
+# -----------------------------
+# Factory to create rewards
+# -----------------------------
+def _build_leaf(spec: Dict[str, Any]) -> Reward:
+    t = spec.get("type", "").lower()
+
+    if t == "sentiment":
+        return SentimentReward(model=spec.get("model", "distilbert-base-uncased-finetuned-sst-2-english"))
+    elif t == "perplexity":
+        return PerplexityReward(model=spec.get("model", "gpt2"))
+    elif t == "bleu":
+        return BLEUReward(smooth_method=spec.get("smooth_method", "exp"), lowercase=spec.get("lowercase", True))
+    elif t == "rouge_l":
+        return RougeLReward(use_stemmer=spec.get("use_stemmer", True), lowercase=spec.get("lowercase", True))
+    elif t == "toxicity":
+        return ToxicityReward(model=spec.get("model", "original"), invert=spec.get("invert", True))
+    elif t == "bertscore":
+        return BERTScoreReward(model_type=spec.get("model_type", "microsoft/deberta-xlarge-mnli"))
+    elif t == "cosine_sts" or t == "sts":
+        return CosineSTS(model_name=spec.get("model", "all-MiniLM-L6-v2"), device=spec.get("device"))
+    else:
+        raise ValueError(f"Unknown reward type: {t}")
+
+
+# -----------------------------
+# Handle post-processing
+# -----------------------------
+class Clip(Reward):
+    def __init__(self, base: Reward, lo: float = 0.0, hi: float = 1.0):
+        self.base, self.lo, self.hi = base, float(lo), float(hi)
+
+    def __call__(self, *args, **kwargs):
+        return max(self.lo, min(self.hi, float(self.base(*args, **kwargs))))
+
+
+class Scale(Reward):
+    def __init__(self, base: Reward, mul: float = 1.0, add: float = 0.0):
+        self.base, self.mul, self.add = base, float(mul), float(add)
+
+    def __call__(self, *args, **kwargs):
+        return self.mul * float(self.base(*args, **kwargs)) + self.add
+
+
+class EMANormalize(Reward):
+    """Keeps an exponential moving average of mean/std to normalize rewards online."""
+    def __init__(self, base: Reward, decay: float = 0.99, eps: float = 1e-8):
+        self.base, self.decay, self.eps = base, float(decay), float(eps)
+        self._m, self._v = 0.0, 1.0  # mean, variance (EMAs)
+        self._init = False
+
+    def __call__(self, *args, **kwargs):
+        x = float(self.base(*args, **kwargs))
+        if not self._init:
+            self._m, self._v, self._init = x, 1.0, True
+        # EMA updates
+        m = self.decay * self._m + (1 - self.decay) * x
+        v = self.decay * self._v + (1 - self.decay) * (x - m) ** 2
+        self._m, self._v = m, v
+        return (x - m) / math.sqrt(v + self.eps)
+
+
+# -----------------------------
+# Handle composition of rewards (e.g., weighted sum)
+# -----------------------------
+class WeightedSum(Reward):
+    def __init__(self, components: List[Tuple[Reward, float]]):
+        assert components, "WeightedSum requires at least one component"
+        self.components = components
+        self.wsum = sum(w for _, w in components)
+        self.wsum = self.wsum if self.wsum != 0 else 1.0
+
+    def __call__(self, response, target, **kw):
+        total = 0.0
+        for comp, w in self.components:
+            total += float(comp(response, target, **kw)) * float(w)
+        return total / self.wsum
+
+
+# -----------------------------
+# Factory to build reward based on spec
+# -----------------------------
+def make_reward(spec: Dict[str, Any]) -> Reward:
+    """
+    Create and return a reward object based on the spec.
+    """
+    t = spec.get("type", "").lower()
+
+    if t == "weighted_sum":
+        comps = []
+        for c in spec.get("components", []):
+            w = float(c.get("weight", 1.0))
+            base = _build_leaf(c)
+            base = _wrap_post(base, c.get("postprocess"))
+            comps.append((base, w))
+        reward = WeightedSum(comps)
+        return _wrap_post(reward, spec.get("postprocess"))
+    else:
+        leaf = _build_leaf(spec)
+        return _wrap_post(leaf, spec.get("postprocess"))
+
+
+def _wrap_post(base: Reward, post: List[Dict[str, Any]] | None) -> Reward:
+    if not post:
+        return base
+    r: Reward = base
+    for p in post:
+        pt = p.get("type", "").lower()
+        if pt == "clip":
+            r = Clip(r, lo=float(p.get("min", 0.0)), hi=float(p.get("max", 1.0)))
+        elif pt == "scale":
+            r = Scale(r, mul=float(p.get("mul", 1.0)), add=float(p.get("add", 0.0)))
+        elif pt == "ema_normalize":
+            r = EMANormalize(r, decay=float(p.get("decay", 0.99)), eps=float(p.get("eps", 1e-8)))
+        else:
+            raise ValueError(f"Unknown postprocess type: {pt}")
+    return r
+```
+
+### Test Loop
+
+```python
+from datasets import load_dataset
+from torch.utils.data import DataLoader
+from transformers import AutoTokenizer
+from MHT_HybridTrainer import HybridTrainer
+from MHT_RewardFactory import make_reward
+import os
+# 1. Load dataset (Wikitext)
+dataset = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
+
+# 2. Filter out blank lines (important for Wikitext)
+dataset = dataset.filter(lambda x: x["text"] is not None and x["text"].strip() != "")
+
+# 3. Shuffle + select a smaller subset BEFORE tokenization
+dataset = dataset.shuffle(seed=42).select(range(200))  # 👈 change 200 to whatever you need
+
+# 4. Load tokenizer
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+max_length = 512
+
+# 5. Preprocess/tokenize
+def preprocess(example):
+    text = example["text"].strip()
+    prompt = f"### Prompt:\n\n```{text}```\n\n### Response:\n\n"
+    output = text + tokenizer.eos_token
+
+    # Tokenize combined prompt+output
+    enc = tokenizer(
+        prompt + output,
+        truncation=True,
+        max_length=max_length,
+        padding="max_length",
+    )
+    
+    # Mask prompt portion in labels
+    prompt_ids = tokenizer(prompt, truncation=True, max_length=max_length)["input_ids"]
+    labels = enc["input_ids"].copy()
+    labels[: len(prompt_ids)] = [-100] * len(prompt_ids)
+
+    enc["labels"] = labels
+    return enc
+
+train_data = dataset.map(preprocess, remove_columns=["text"])
+
+reward_spec = {
+    "type": "sentiment",  # Specify the reward type
+    "target": "positive"  # Specify the target sentiment
+}
+# 6. Reward function
+reward_fn = make_reward(reward_spec)
+
+# 7. Initialize trainer
+trainer = HybridTrainer(
+    base_model_name="gpt2",
+    tokenizer=tokenizer,
+    train_data=train_data,
+    reward_fn=reward_fn,
+    optimizer_config={"OPTIMIZER": "adamw_8bit"},
+    scheduler_config={
+        "SCHEDULER": "linear",
+        "NUM_TRAINING_STEPS": 20000,
+        "NUM_WARMUP_STEPS": 1000,
+    },
+    lrate=2e-5,
+    batch_size=1,  # keep small for smoke test
+)
+
+os.system('clear')
+train_data.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+# 8. Build DataLoader
+dl = DataLoader(train_data, batch_size=1, shuffle=True)
+
+# 9. Debug: run tiny training with just 2 samples
+cnt = 0
+for step in dl:
+    # Ensure all tensors in the batch are on the same device as the model
+    step["input_ids"] = step["input_ids"].to(trainer.device)
+    step["attention_mask"] = step["attention_mask"].to(trainer.device)
+    step["labels"] = step["labels"].to(trainer.device)
+
+    # SFT step
+    loss = trainer.sft_step(step)
+    print(f"[{cnt}] SFT loss: {loss:.4f}")
+
+    # Generate the model response for the single example (single response, not a batch)
+    response_ids = trainer.respond_to_batch(step["input_ids"])
+
+    # Decode the response from token IDs to text
+    response = tokenizer.decode(response_ids[0], skip_special_tokens=True)  # Only one response
+
+    # Reconstruct the target text from the labels (where labels are not -100)
+    target_ids = step["labels"]  # The labels are the target token IDs
+    target_ids = target_ids[target_ids != -100]  # Remove the masked tokens (-100)
+
+    # Decode the target tokens into the target text
+    target = tokenizer.decode(target_ids, skip_special_tokens=True)
+
+    print(f"---------------------\nRESPONSE: {response}\nTARGET: {target}\n-------------------------")
+    # Compute rewards using the fixed reward_fn reference (response, target as text)
+    reward = reward_fn(response, target)
+
+    # PPO step (pass reward as a list for single example)
+    trainer.ppo_step(step["input_ids"], response_ids, [reward])  # Wrap reward in a list
+
+    # Debugging output: print responses and rewards
+    if trainer.debug:  # Use trainer.debug instead of self.debug
+        print(f"[DEBUG] response={response}")
+        print(f"[DEBUG] reward={reward}")
+
+    cnt += 1
+    if cnt >= 2:  # Only run 2 iterations for the smoke test
+        break
+```
